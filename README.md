@@ -29,6 +29,23 @@ It is a small drop-in DLL: no AirDC++ files or settings are changed, and removin
 
 Your own AirDC++ colour settings are used as the base: every colour AirDC++ draws is converted to its dark equivalent (same hue, flipped lightness), so the dark theme still matches your settings.
 
+## Text colour palettes
+
+Text colours (chat, nicks, timestamps, links, user list and status colours, list text, labels and menus) follow a palette. Each colour is moved to the palette's shade of its colour family, and plain text gets the palette's text colour. Backgrounds are not changed.
+
+Pick one from **View > Dark mode text colors**. It switches live, including chat text already on screen.
+
+| Palette | Look |
+|---|---|
+| Cream (default) | Cream text with complementary blues and reds |
+| Catppuccin Mocha | Soft pastels |
+| Dracula | Vivid pink, purple, cyan and green |
+| Nord | Muted arctic blues |
+| Gruvbox | Warm retro cream, orange and aqua |
+| AirDC++ colors | Your AirDC++ colours, only darkened |
+
+The choice is saved in `%LOCALAPPDATA%\AirDC++\darkmode.ini`.
+
 ## Requirements
 
 - AirDC++ 4.30 (64-bit) on Windows 10 or 11
@@ -49,9 +66,10 @@ By default the theme follows Windows (Settings > Personalization > Colors > Choo
 ```ini
 [DarkMode]
 Mode=auto   ; auto (follow Windows), dark or light
+Palette=cream   ; cream, catppuccin, dracula, nord, gruvbox or airdc
 ```
 
-The file is read again whenever Windows reports a theme change.
+The file is read again whenever Windows reports a theme change. A palette picked from the View menu (saved per user) takes precedence over `Palette=` here.
 
 ## Build
 

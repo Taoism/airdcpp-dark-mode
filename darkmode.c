@@ -118,6 +118,8 @@ typedef enum { MODE_AUTO, MODE_DARK, MODE_LIGHT } DarkModeSetting;
 typedef enum { AppModeDefault, AppModeAllowDark, AppModeForceDark, AppModeForceLight } PreferredAppMode;
 
 static DarkModeSetting g_setting = MODE_AUTO;
+static int g_palette;  // index into kPalettes; 0 = AirDC's own colors
+static int PaletteFromKey(const WCHAR *key);
 
 static BOOL SystemUsesDarkApps(void)
 {
@@ -146,6 +148,13 @@ static void ReadSettings(void)
         n--;
     lstrcpyW(ini + n, L"darkmode.ini");
     GetPrivateProfileStringW(L"DarkMode", L"Mode", L"auto", mode, ARRAYSIZE(mode), ini);
+    // Palette: the one picked from the View menu (per user), else the DLL's ini.
+    WCHAR user[MAX_PATH], palette[32] = L"";
+    if (ExpandEnvironmentStringsW(L"%LOCALAPPDATA%\\AirDC++\\darkmode.ini", user, MAX_PATH))
+        GetPrivateProfileStringW(L"DarkMode", L"Palette", L"", palette, ARRAYSIZE(palette), user);
+    if (!palette[0])
+        GetPrivateProfileStringW(L"DarkMode", L"Palette", L"", palette, ARRAYSIZE(palette), ini);
+    g_palette = PaletteFromKey(palette);
     if (!lstrcmpiW(mode, L"dark") || !lstrcmpiW(mode, L"on"))
         g_setting = MODE_DARK;
     else if (!lstrcmpiW(mode, L"light") || !lstrcmpiW(mode, L"off"))
@@ -279,6 +288,76 @@ static COLORREF Inv(COLORREF c)
 
 static COLORREF FwdIf(COLORREF c) { return g_dark ? Fwd(c) : c; }
 
+// ---------------------------------------------------------------------------
+// Text color palettes: every text color is moved to the palette's shade of
+// its hue family; greys and white become the palette's dim or main text color.
+// Backgrounds are not touched.
+
+typedef struct {
+    const WCHAR *name, *key;
+    COLORREF fg, dim;
+    COLORREF hue[8];  // red, orange, yellow, green, cyan, blue, purple, pink
+} Palette;
+
+#define HEX(x) RGB(((x) >> 16) & 0xFF, ((x) >> 8) & 0xFF, (x) & 0xFF)
+static const Palette kPalettes[] = {
+    { L"AirDC++ colors", L"airdc" },  // no remapping
+    { L"Catppuccin Mocha", L"catppuccin", HEX(0xCDD6F4), HEX(0xA6ADC8),
+      { HEX(0xF38BA8), HEX(0xFAB387), HEX(0xF9E2AF), HEX(0xA6E3A1), HEX(0x94E2D5), HEX(0x89B4FA), HEX(0xCBA6F7), HEX(0xF5C2E7) } },
+    { L"Dracula", L"dracula", HEX(0xF8F8F2), HEX(0x8A93B8),
+      { HEX(0xFF5555), HEX(0xFFB86C), HEX(0xF1FA8C), HEX(0x50FA7B), HEX(0x8BE9FD), HEX(0xBD93F9), HEX(0xBD93F9), HEX(0xFF79C6) } },
+    { L"Nord", L"nord", HEX(0xECEFF4), HEX(0x9AA5B8),
+      { HEX(0xBF616A), HEX(0xD08770), HEX(0xEBCB8B), HEX(0xA3BE8C), HEX(0x88C0D0), HEX(0x81A1C1), HEX(0xB48EAD), HEX(0xB48EAD) } },
+    { L"Gruvbox", L"gruvbox", HEX(0xEBDBB2), HEX(0xA89984),
+      { HEX(0xFB4934), HEX(0xFE8019), HEX(0xFABD2F), HEX(0xB8BB26), HEX(0x8EC07C), HEX(0x83A598), HEX(0xD3869B), HEX(0xD3869B) } },
+    { L"Cream (default)", L"cream", HEX(0xF2E6D0), HEX(0xB3A895),
+      { HEX(0xE5534B), HEX(0xF07C5A), HEX(0xF2A07B), HEX(0x7FB8F0), HEX(0x8FD0F5), HEX(0x5E9EFF), HEX(0x8F9FFF), HEX(0xF0717A) } },
+};
+#undef HEX
+
+#define ID_PALETTE_FIRST 0xDA10  // View menu commands, one per palette
+static void AddPaletteMenu(HMENU menu);
+
+// OKLab hue angles (degrees) of the families above.
+static const float kHueAnchors[8] = { 25, 60, 100, 140, 195, 260, 305, 345 };
+
+#define PALETTE_DEFAULT 5  // Cream: cream text, blues and reds
+
+static int PaletteFromKey(const WCHAR *key)
+{
+    for (int i = 0; i < ARRAYSIZE(kPalettes); i++)
+        if (!lstrcmpiW(key, kPalettes[i].key))
+            return i;
+    return PALETTE_DEFAULT;
+}
+
+// c is a final (dark mode) text color.
+static COLORREF PaletteText(COLORREF c)
+{
+    if (!g_palette || (c & 0xFF000000))
+        return c;
+    const Palette *p = &kPalettes[g_palette];
+    float L, a, b;
+    ToLab(c, &L, &a, &b);
+    if (sqrtf(a * a + b * b) < 0.04f)
+        return L >= 0.7f ? p->fg : p->dim;
+    float h = atan2f(b, a) * 57.29578f;
+    if (h < 0)
+        h += 360;
+    int best = 0;
+    float bestDist = 1000;
+    for (int i = 0; i < ARRAYSIZE(kHueAnchors); i++) {
+        float d = fabsf(h - kHueAnchors[i]);
+        if (d > 180)
+            d = 360 - d;
+        if (d < bestDist) {
+            bestDist = d;
+            best = i;
+        }
+    }
+    return p->hue[best];
+}
+
 // Text on a flipped background: the lighter of c and Fwd(c). Black still turns
 // white, but AirDC's status colors (green, red, grey), already light enough,
 // stay as they are instead of turning dark.
@@ -290,10 +369,11 @@ static COLORREF TextFwd(COLORREF c)
     float Lc, Lf, a, b;
     ToLab(c, &Lc, &a, &b);
     ToLab(f, &Lf, &a, &b);
-    if (Lf >= Lc)
-        return f;
-    CachePut(g_invCache, c, c);
-    return c;
+    COLORREF r = Lf >= Lc ? f : c;
+    COLORREF pal = PaletteText(r);
+    if (pal != r || r == c)
+        CachePut(g_invCache, pal, c);  // so Inv() gives AirDC its own color back
+    return pal;
 }
 static COLORREF InvIf(COLORREF c) { return g_dark ? Inv(c) : c; }
 
@@ -927,7 +1007,7 @@ static BOOL DarkDefault(HWND hwnd, UINT msg, WPARAM wp, LRESULT *result)
     case WM_CTLCOLORMSGBOX: case WM_CTLCOLOREDIT: case WM_CTLCOLORLISTBOX: case WM_CTLCOLORBTN:
     case WM_CTLCOLORDLG: case WM_CTLCOLORSCROLLBAR: case WM_CTLCOLORSTATIC: {
         int sys = (msg == WM_CTLCOLOREDIT || msg == WM_CTLCOLORLISTBOX) ? COLOR_WINDOW : COLOR_BTNFACE;
-        Real_SetTextColor((HDC)wp, FlippedSys(COLOR_WINDOWTEXT));
+        Real_SetTextColor((HDC)wp, PaletteText(FlippedSys(COLOR_WINDOWTEXT)));
         Real_SetBkColor((HDC)wp, FlippedSys(sys));
         *result = (LRESULT)SolidBrush(FlippedSys(sys));
         return TRUE;
@@ -1073,6 +1153,17 @@ static BOOL IsGetColorMessage(HWND hwnd, UINT msg)
     return FALSE;
 }
 
+static BOOL IsTextColorMessage(UINT msg)
+{
+    return msg == LVM_SETTEXTCOLOR || msg == TVM_SETTEXTCOLOR || msg == TTM_SETTIPTEXTCOLOR || msg == RB_SETTEXTCOLOR;
+}
+
+// Dark mode value of a color sent with msg.
+static COLORREF MessageColor(UINT msg, COLORREF c)
+{
+    return !g_dark ? c : IsTextColorMessage(msg) ? TextFwd(c) : Fwd(c);
+}
+
 static void PropName(UINT msg, WCHAR *out)
 {
     wsprintfW(out, L"DarkMode.%X", msg);
@@ -1119,7 +1210,7 @@ static LRESULT WINAPI Hook_SendMessageW(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             SetPropW(hwnd, prop, (HANDLE)(ULONG_PTR)((ULONG64)(COLORREF)lp + 1));
         else
             RemovePropW(hwnd, prop);
-        LRESULT r = Real_SendMessageW(hwnd, msg, wp, plain ? (LPARAM)FwdIf((COLORREF)lp) : lp);
+        LRESULT r = Real_SendMessageW(hwnd, msg, wp, plain ? (LPARAM)MessageColor(msg, (COLORREF)lp) : lp);
         return (LRESULT)InvIf((COLORREF)r);
     }
     if (IsGetColorMessage(hwnd, msg))
@@ -1135,14 +1226,16 @@ static void ResendColors(HWND hwnd)
         PropName(kColorMessages[i], prop);
         ULONG_PTR v = (ULONG_PTR)GetPropW(hwnd, prop);
         if (v)
-            Real_SendMessageW(hwnd, kColorMessages[i], 0, (LPARAM)FwdIf((COLORREF)(v - 1)));
+            Real_SendMessageW(hwnd, kColorMessages[i], 0, (LPARAM)MessageColor(kColorMessages[i], (COLORREF)(v - 1)));
     }
 }
 
 static const IID kIID_ITextDocument = { 0x8CC497C0, 0xA1DF, 0x11CE, { 0x80, 0x98, 0x00, 0xAA, 0x00, 0x47, 0xBE, 0x5D } };
 
 // Live switch: recolor every run of existing rich edit text.
-static void RecolorRichEdit(HWND hwnd, BOOL toDark)
+// how: RECOLOR_LIGHT, RECOLOR_DARK, or RECOLOR_PALETTE (dark to dark, new palette).
+enum { RECOLOR_LIGHT, RECOLOR_DARK, RECOLOR_PALETTE };
+static void RecolorRichEdit(HWND hwnd, int how)
 {
     IRichEditOle *ole = NULL;
     if (!Real_SendMessageW(hwnd, EM_GETOLEINTERFACE, 0, (LPARAM)&ole) || !ole)
@@ -1166,9 +1259,10 @@ static void RecolorRichEdit(HWND hwnd, BOOL toDark)
                 if (SUCCEEDED(ITextRange_GetFont(r, &f)) && f) {
                     long c;
                     if (SUCCEEDED(ITextFont_GetForeColor(f, &c)) && c != tomAutoColor && c != tomUndefined && !(c & 0xFF000000))
-                        ITextFont_SetForeColor(f, toDark ? Fwd(c) : Inv(c));
-                    if (SUCCEEDED(ITextFont_GetBackColor(f, &c)) && c != tomAutoColor && c != tomUndefined && !(c & 0xFF000000))
-                        ITextFont_SetBackColor(f, toDark ? Fwd(c) : Inv(c));
+                        ITextFont_SetForeColor(f, how == RECOLOR_LIGHT ? Inv(c) : how == RECOLOR_DARK ? TextFwd(c) : TextFwd(Inv(c)));
+                    if (how != RECOLOR_PALETTE && SUCCEEDED(ITextFont_GetBackColor(f, &c)) && c != tomAutoColor &&
+                        c != tomUndefined && !(c & 0xFF000000))
+                        ITextFont_SetBackColor(f, how == RECOLOR_DARK ? Fwd(c) : Inv(c));
                     ITextFont_Release(f);
                 }
                 ITextRange_Collapse(r, tomEnd);
@@ -1936,7 +2030,7 @@ static BOOL DrawOdMenuItem(const DRAWITEMSTRUCT *d)
         SelectObject(dc, oldPen);
         SelectObject(dc, oldBrush);
     }
-    COLORREF fg = disabled ? MENU_GRAY : (d->itemState & ODS_SELECTED) ? RGB(255, 255, 255) : MENU_TEXT;
+    COLORREF fg = disabled ? MENU_GRAY : (d->itemState & ODS_SELECTED) ? RGB(255, 255, 255) : PaletteText(MENU_TEXT);
     MenuFonts();
     int oldMode = SetBkMode(dc, TRANSPARENT);
     COLORREF oldFg = Real_SetTextColor(dc, fg);
@@ -2276,9 +2370,15 @@ static void PaintThinThumbs(HWND hwnd)
         ReleaseDC(hwnd, dc);
 }
 
+static void SetPalette(int index);
+
 static LRESULT CALLBACK SubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR data)
 {
     (void)id; (void)data;
+    if (msg == WM_COMMAND && !lp && LOWORD(wp) >= ID_PALETTE_FIRST && LOWORD(wp) < ID_PALETTE_FIRST + ARRAYSIZE(kPalettes)) {
+        SetPalette(LOWORD(wp) - ID_PALETTE_FIRST);
+        return 0;
+    }
     if (!g_dark)
         return DefSubclassProc(hwnd, msg, wp, lp);
 
@@ -2333,7 +2433,7 @@ static LRESULT CALLBACK SubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, 
             // Default handling (DefWindowProc/DefDlgProc) picked a system color,
             // or uxtheme the light tab-page texture of property pages, and set
             // the DC colors inside user32: redo them flipped.
-            Real_SetTextColor(dc, FlippedSys(COLOR_WINDOWTEXT));
+            Real_SetTextColor(dc, PaletteText(FlippedSys(COLOR_WINDOWTEXT)));
             Real_SetBkColor(dc, FlippedSys(sys));
             return (LRESULT)ControlBrush(FlippedSys(sys));
         }
@@ -2483,7 +2583,7 @@ static void ApplyToWindow(HWND hwnd)
             COLORREF bk = dark ? FlippedSys(COLOR_WINDOW) : Real_GetSysColor(COLOR_WINDOW);
             Real_SendMessageW(hwnd, LVM_SETBKCOLOR, 0, bk);
             Real_SendMessageW(hwnd, LVM_SETTEXTBKCOLOR, 0, bk);
-            Real_SendMessageW(hwnd, LVM_SETTEXTCOLOR, 0, dark ? FlippedSys(COLOR_WINDOWTEXT) : Real_GetSysColor(COLOR_WINDOWTEXT));
+            Real_SendMessageW(hwnd, LVM_SETTEXTCOLOR, 0, dark ? PaletteText(FlippedSys(COLOR_WINDOWTEXT)) : Real_GetSysColor(COLOR_WINDOWTEXT));
         }
         HWND header = ListView_GetHeader(hwnd);
         if (header) {
@@ -2498,7 +2598,7 @@ static void ApplyToWindow(HWND hwnd)
         PropName(TVM_SETBKCOLOR, prop);
         if (!GetPropW(hwnd, prop)) {
             Real_SendMessageW(hwnd, TVM_SETBKCOLOR, 0, dark ? (LPARAM)FlippedSys(COLOR_WINDOW) : -1);
-            Real_SendMessageW(hwnd, TVM_SETTEXTCOLOR, 0, dark ? (LPARAM)FlippedSys(COLOR_WINDOWTEXT) : -1);
+            Real_SendMessageW(hwnd, TVM_SETTEXTCOLOR, 0, dark ? (LPARAM)PaletteText(FlippedSys(COLOR_WINDOWTEXT)) : -1);
         }
     } else if (!lstrcmpiW(cls, TOOLTIPS_CLASSW)) {
         SetWindowTheme(hwnd, dark ? L"DarkMode_Explorer" : NULL, NULL);
@@ -2723,8 +2823,10 @@ static LRESULT CALLBACK CallWndRetProc(int code, WPARAM wp, LPARAM lp)
         }
         if (c->message == WM_ENTERIDLE && c->wParam == MSGF_MENU && g_dark) {
             EnumThreadWindows(GetCurrentThreadId(), PaintMenuFrame, 0);
-        } else if (c->message == WM_INITMENUPOPUP && g_dark && !HIWORD(c->lParam)) {  // not the window (system) menu
-            OwnerDrawMenu((HMENU)c->wParam);
+        } else if (c->message == WM_INITMENUPOPUP && !HIWORD(c->lParam)) {  // not the window (system) menu
+            AddPaletteMenu((HMENU)c->wParam);
+            if (g_dark)
+                OwnerDrawMenu((HMENU)c->wParam);
         } else if (c->message == WM_EXITMENULOOP) {
             RestoreMenus(0, 0);
         }
@@ -2759,13 +2861,76 @@ static LRESULT CALLBACK CallWndRetProc(int code, WPARAM wp, LPARAM lp)
     return CallNextHookEx(g_hookRet, code, wp, lp);
 }
 
+static HMENU g_paletteMenu;
+
+// Adds "Dark mode text colors" to the end of AirDC's View menu (the one with
+// Public hubs) and checks the current palette.
+static void AddPaletteMenu(HMENU menu)
+{
+    if (GetMenuState(menu, 42772 /* View > Public hubs */, MF_BYCOMMAND) == (UINT)-1)
+        return;
+    if (!g_paletteMenu) {
+        g_paletteMenu = CreatePopupMenu();
+        static const int order[] = { PALETTE_DEFAULT, 1, 2, 3, 4, 0 };
+        for (int i = 0; i < ARRAYSIZE(order); i++)
+            AppendMenuW(g_paletteMenu, MF_STRING, ID_PALETTE_FIRST + order[i], kPalettes[order[i]].name);
+    }
+    BOOL present = FALSE;
+    for (int i = GetMenuItemCount(menu) - 1; i >= 0 && !present; i--)
+        present = GetSubMenu(menu, i) == g_paletteMenu;
+    if (!present) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(menu, MF_POPUP, (UINT_PTR)g_paletteMenu, L"Dark mode text colors");
+    }
+    int n = GetMenuItemCount(g_paletteMenu), current = 0;
+    for (int i = 0; i < n; i++)
+        if (GetMenuItemID(g_paletteMenu, i) == ID_PALETTE_FIRST + (UINT)g_palette)
+            current = i;
+    CheckMenuRadioItem(g_paletteMenu, 0, n - 1, current, MF_BYPOSITION);
+}
+
+static BOOL CALLBACK RepaletteChild(HWND hwnd, LPARAM lp)
+{
+    (void)lp;
+    ApplyToWindow(hwnd);
+    ResendColors(hwnd);
+    if (IsRichEdit(hwnd))
+        RecolorRichEdit(hwnd, RECOLOR_PALETTE);
+    return TRUE;
+}
+
+static BOOL CALLBACK RepaletteTop(HWND hwnd, LPARAM lp)
+{
+    (void)lp;
+    EnumChildWindows(hwnd, RepaletteChild, 0);
+    RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
+    return TRUE;
+}
+
+// Picked from the menu: remember it per user (the program folder is usually
+// not writable) and recolor everything that is open.
+static void SetPalette(int index)
+{
+    if (index < 0 || index >= ARRAYSIZE(kPalettes) || index == g_palette)
+        return;
+    WCHAR dir[MAX_PATH], ini[MAX_PATH];
+    if (ExpandEnvironmentStringsW(L"%LOCALAPPDATA%\\AirDC++", dir, MAX_PATH)) {
+        CreateDirectoryW(dir, NULL);
+        wsprintfW(ini, L"%s\\darkmode.ini", dir);
+        WritePrivateProfileStringW(L"DarkMode", L"Palette", kPalettes[index].key, ini);
+    }
+    g_palette = index;
+    if (g_dark)
+        EnumThreadWindows(GetCurrentThreadId(), RepaletteTop, 0);
+}
+
 static BOOL CALLBACK ReapplyChild(HWND hwnd, LPARAM lp)
 {
     (void)lp;
     ApplyToWindow(hwnd);
     ResendColors(hwnd);
     if (IsRichEdit(hwnd))
-        RecolorRichEdit(hwnd, g_dark);
+        RecolorRichEdit(hwnd, g_dark ? RECOLOR_DARK : RECOLOR_LIGHT);
     SendMessageW(hwnd, WM_SYSCOLORCHANGE, 0, 0);
     SendMessageW(hwnd, WM_THEMECHANGED, 0, 0);
     return TRUE;
