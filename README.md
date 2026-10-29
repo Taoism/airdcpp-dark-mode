@@ -6,6 +6,18 @@ It is a small drop-in DLL: no AirDC++ files or settings are changed, and removin
 
 > Unofficial add-on. Not made by or affiliated with the AirDC++ developers.
 
+![Extensions window in dark mode](screenshots/extensions.png)
+
+## Screenshots
+
+| Light (normal AirDC++) | Dark |
+|---|---|
+| ![Download queue, light](screenshots/queue-light.png) | ![Download queue, dark](screenshots/queue-dark.png) |
+
+| Settings | Dialogs | Menus |
+|---|---|---|
+| ![Settings, colors and fonts](screenshots/settings-colors.png) | ![Favorite hub properties](screenshots/dialog.png) | ![Popup menu](screenshots/menu.png) |
+
 ## What it covers
 
 - Title bars, menu bar, popup and context menus (with an accent-blue selection)
