@@ -1309,7 +1309,7 @@ static FARPROC WINAPI Hook_GetProcAddress(HMODULE module, LPCSTR name)
 // Borders and spin buttons drawn by comctl32 and rich edit: even the dark
 // themes draw edit/combo borders and up-down buttons light grey.
 
-typedef enum { TK_NONE, TK_EDIT, TK_COMBO, TK_SPIN, TK_GROUPBOX, TK_LISTVIEW, TK_DATEPICKER } ThemeKind;
+typedef enum { TK_NONE, TK_EDIT, TK_COMBO, TK_SPIN, TK_GROUPBOX, TK_LISTVIEW, TK_DATEPICKER, TK_TOOLBAR } ThemeKind;
 
 static void PatchImportByAddress(HMODULE module, FARPROC target, void *hook);
 
@@ -1339,6 +1339,7 @@ static ThemeKind ClassKind(LPCWSTR classes)
     static const struct { const WCHAR *name; ThemeKind k; } names[] = {
         { L"Edit", TK_EDIT }, { L"Combobox", TK_COMBO }, { L"Spin", TK_SPIN }, { L"Button", TK_GROUPBOX },
         { L"ListView", TK_LISTVIEW }, { L"DatePicker", TK_DATEPICKER },
+        { L"Toolbar", TK_TOOLBAR },
     };
     for (int i = 0; i < ARRAYSIZE(names); i++)
         if (lstrlenW(names[i].name) == len && CompareStringOrdinal(p, len, names[i].name, len, TRUE) == CSTR_EQUAL)
@@ -1407,8 +1408,8 @@ static HRESULT WINAPI Lib_CloseThemeData(HTHEME t)
     return LibReal_CloseThemeData(t);
 }
 
-#define BORDER_NORMAL RGB(75, 75, 75)
-#define BORDER_HOT    RGB(100, 100, 100)
+#define BORDER_NORMAL RGB(52, 52, 52)
+#define BORDER_HOT    RGB(85, 85, 85)
 
 static void FlatBox(HDC dc, const RECT *rc, COLORREF border, COLORREF fill)
 {
@@ -1475,6 +1476,27 @@ static BOOL DrawDarkPart(ThemeKind k, HDC dc, int part, int state, const RECT *r
             COLORREF bg = state == 2 ? Blend(field, RGB(255, 255, 255), 88) :
                           state == 3 ? Blend(field, RGB(255, 255, 255), 78) : field;
             DrawCaptionGlyph(dc, rc, L'6', bg, state == 4 ? RGB(110, 110, 110) : RGB(200, 200, 200));
+            return TRUE;
+        }
+        break;
+    case TK_TOOLBAR:
+        // Checked buttons (the open frames) get no box: their icons sit on the
+        // toolbar background. Hot and pressed states keep the theme's look.
+        if ((part == TP_BUTTON || part == TP_DROPDOWNBUTTON || part == TP_SPLITBUTTON ||
+             part == TP_SPLITBUTTONDROPDOWN) && state == TS_CHECKED)
+            return TRUE;
+        if (part == TP_SEPARATOR || part == TP_SEPARATORVERT) {
+            RECT line = *rc;
+            if (part == TP_SEPARATOR) {
+                line.left = (rc->left + rc->right) / 2;
+                line.right = line.left + 1;
+                InflateRect(&line, 0, -(rc->bottom - rc->top) / 6);
+            } else {
+                line.top = (rc->top + rc->bottom) / 2;
+                line.bottom = line.top + 1;
+                InflateRect(&line, -(rc->right - rc->left) / 6, 0);
+            }
+            Real_FillRect(dc, &line, SolidBrush(BORDER_NORMAL));
             return TRUE;
         }
         break;
@@ -2133,6 +2155,100 @@ static void PaintDisabledStatic(HWND hwnd, HDC dc)
     SelectObject(dc, oldFont);
 }
 
+// Popup menus and combo box drop-down lists get a light grey 1px frame from
+// Windows: fill their non-client area with their own background instead.
+static BOOL PopupFrameColor(HWND hwnd, COLORREF *c)
+{
+    if (IsClass(hwnd, L"#32768")) {
+        *c = MENU_BG;
+        return TRUE;
+    }
+    if (IsClass(hwnd, L"ComboLBox")) {
+        *c = FlippedSys(COLOR_WINDOW);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void PaintPopupFrame(HWND hwnd, HDC given, COLORREF c)
+{
+    RECT wr, cr;
+    GetWindowRect(hwnd, &wr);
+    GetClientRect(hwnd, &cr);
+    MapWindowPoints(hwnd, NULL, (POINT *)&cr, 2);
+    OffsetRect(&cr, -wr.left, -wr.top);
+    OffsetRect(&wr, -wr.left, -wr.top);
+    if (EqualRect(&wr, &cr))
+        return;
+    HDC dc = given ? given : GetWindowDC(hwnd);
+    int saved = SaveDC(dc);
+    ExcludeClipRect(dc, cr.left, cr.top, cr.right, cr.bottom);
+    Real_FillRect(dc, &wr, SolidBrush(c));
+    RestoreDC(dc, saved);
+    if (!given)
+        ReleaseDC(hwnd, dc);
+}
+
+// Menu windows (#32768) are run by win32k: their messages never reach the
+// hooks or subclasses here. Their owner gets WM_ENTERIDLE while a menu is open,
+// so the frames of all open menus are painted over then.
+static BOOL CALLBACK PaintMenuFrame(HWND hwnd, LPARAM lp)
+{
+    (void)lp;
+    if (IsWindowVisible(hwnd) && IsClass(hwnd, L"#32768"))
+        PaintPopupFrame(hwnd, NULL, MENU_BG);
+    return TRUE;
+}
+
+// Windows 11's dark scroll bars show a thin light-grey thumb line while the
+// mouse is elsewhere. It is repainted here in a darker shade after Windows
+// draws it; the wide thumb shown while the mouse is over the bar is left alone.
+#define SB_TRACK RGB(23, 23, 23)
+#define SB_THUMB RGB(78, 78, 78)
+#define SB_TIMER 0xDA4C
+static const WCHAR kScrollHot[] = L"DarkMode.sbhot";
+
+static void PaintThinThumbs(HWND hwnd)
+{
+    LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+    if (!g_dark || !(style & (WS_HSCROLL | WS_VSCROLL)) || !IsWindowVisible(hwnd) || GetCapture() == hwnd ||
+        GetPropW(hwnd, kScrollHot))
+        return;
+    Kind kind = WindowKind(hwnd);
+    if (kind != KIND_LISTVIEW && kind != KIND_TREEVIEW && kind != KIND_RICHEDIT)
+        return;
+    RECT wr;
+    GetWindowRect(hwnd, &wr);
+    HDC dc = NULL;
+    int thick = MulDiv(2, GetDpiForWindow(hwnd), 96);
+    for (int vert = 0; vert < 2; vert++) {
+        if (!(style & (vert ? WS_VSCROLL : WS_HSCROLL)))
+            continue;
+        SCROLLBARINFO sbi = { sizeof(sbi) };
+        if (!GetScrollBarInfo(hwnd, vert ? OBJID_VSCROLL : OBJID_HSCROLL, &sbi) ||
+            (sbi.rgstate[0] & (STATE_SYSTEM_INVISIBLE | STATE_SYSTEM_OFFSCREEN)))
+            continue;
+        RECT r = sbi.rcScrollBar;
+        OffsetRect(&r, -wr.left, -wr.top);
+        if (!dc)
+            dc = GetWindowDC(hwnd);
+        Real_FillRect(dc, &r, SolidBrush(SB_TRACK));
+        if ((sbi.rgstate[0] & STATE_SYSTEM_UNAVAILABLE) || sbi.xyThumbBottom <= sbi.xyThumbTop)
+            continue;
+        RECT t;
+        if (vert) {
+            int x = r.left + (r.right - r.left) / 2;
+            SetRect(&t, x, r.top + sbi.xyThumbTop, x + thick, r.top + sbi.xyThumbBottom);
+        } else {
+            int y = r.top + (r.bottom - r.top) / 2;
+            SetRect(&t, r.left + sbi.xyThumbTop, y, r.left + sbi.xyThumbBottom, y + thick);
+        }
+        Real_FillRect(dc, &t, SolidBrush(SB_THUMB));
+    }
+    if (dc)
+        ReleaseDC(hwnd, dc);
+}
+
 static LRESULT CALLBACK SubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR data)
 {
     (void)id; (void)data;
@@ -2140,6 +2256,39 @@ static LRESULT CALLBACK SubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, 
         return DefSubclassProc(hwnd, msg, wp, lp);
 
     switch (msg) {
+    case WM_HSCROLL: case WM_VSCROLL: case WM_MOUSEWHEEL: case WM_MOUSEHWHEEL: case WM_SIZE: case WM_KEYDOWN: {
+        LRESULT r = DefSubclassProc(hwnd, msg, wp, lp);
+        PaintThinThumbs(hwnd);
+        return r;
+    }
+
+    case WM_NCMOUSEMOVE:
+        // Over a scroll bar Windows shows the wide thumb: leave it alone.
+        if ((wp == HTHSCROLL || wp == HTVSCROLL) && !GetPropW(hwnd, kScrollHot))
+            SetPropW(hwnd, kScrollHot, (HANDLE)1);
+        break;
+
+    case WM_NCMOUSELEAVE:
+    case WM_MOUSEMOVE:
+        if (GetPropW(hwnd, kScrollHot)) {
+            RemovePropW(hwnd, kScrollHot);
+            // After Windows' collapse animation.
+            SetTimer(hwnd, SB_TIMER, 700, NULL);
+        }
+        break;
+
+    case WM_TIMER:
+        if (wp == SB_TIMER) {
+            KillTimer(hwnd, SB_TIMER);
+            PaintThinThumbs(hwnd);
+            return 0;
+        }
+        break;
+
+    case WM_NCDESTROY:
+        RemovePropW(hwnd, kScrollHot);
+        break;
+
     case WM_CTLCOLORMSGBOX: case WM_CTLCOLOREDIT: case WM_CTLCOLORLISTBOX: case WM_CTLCOLORBTN:
     case WM_CTLCOLORDLG: case WM_CTLCOLORSCROLLBAR: case WM_CTLCOLORSTATIC: {
         LRESULT r = DefSubclassProc(hwnd, msg, wp, lp);
@@ -2226,9 +2375,30 @@ static LRESULT CALLBACK SubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, 
             return TRUE;
         break;
 
+    case WM_PRINT: {
+        // Menu fade-in animations are drawn from a WM_PRINT copy.
+        COLORREF c;
+        LRESULT r = DefSubclassProc(hwnd, msg, wp, lp);
+        if ((lp & PRF_NONCLIENT) && PopupFrameColor(hwnd, &c))
+            PaintPopupFrame(hwnd, (HDC)wp, c);
+        return r;
+    }
+
     case WM_NCPAINT:
     case WM_NCACTIVATE: {
         LRESULT r = DefSubclassProc(hwnd, msg, wp, lp);
+        COLORREF c;
+        if (PopupFrameColor(hwnd, &c)) {
+            PaintPopupFrame(hwnd, NULL, c);
+            return r;
+        }
+        PaintThinThumbs(hwnd);
+        if ((GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD) && (GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_STATICEDGE) &&
+            !(GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_CLIENTEDGE)) {
+            // Settings pages: the static edge user32 draws is light grey.
+            PaintPopupFrame(hwnd, NULL, BORDER_NORMAL);
+            return r;
+        }
         if (!(GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD))
             PaintMenuBarLine(hwnd);
         else if (GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_CLIENTEDGE)
@@ -2362,6 +2532,49 @@ static void PatchImport(HMODULE module, const char *dll, const char *func, void 
     PatchImportByAddress(module, target, hook);
 }
 
+// List boxes and combo drop-down lists (comctl32) select items with a white
+// background in dark mode: use the accent blue with white text instead.
+static COLORREF (WINAPI *LibReal_SetBkColor)(HDC, COLORREF);
+static COLORREF (WINAPI *LibReal_SetTextColor)(HDC, COLORREF);
+
+static BOOL IsListBoxDC(HDC dc)
+{
+    HWND w = WindowFromDC(dc);
+    return w && (IsClass(w, L"ComboLBox") || IsClass(w, L"ListBox"));
+}
+
+static COLORREF ListSelection(void)
+{
+    BOOL mapped;
+    return DarkSysColor(COLOR_HIGHLIGHT, &mapped);
+}
+
+static COLORREF WINAPI Lib_SetBkColor(HDC dc, COLORREF c)
+{
+    if (g_dark && c == RGB(255, 255, 255) && IsListBoxDC(dc)) {
+        LibReal_SetTextColor(dc, RGB(255, 255, 255));
+        return LibReal_SetBkColor(dc, ListSelection());
+    }
+    return LibReal_SetBkColor(dc, c);
+}
+
+static COLORREF WINAPI Lib_SetTextColor(HDC dc, COLORREF c)
+{
+    if (g_dark && GetBkColor(dc) == ListSelection() && IsListBoxDC(dc))
+        c = RGB(255, 255, 255);
+    return LibReal_SetTextColor(dc, c);
+}
+
+static int (WINAPI *LibReal_SetScrollInfo)(HWND, int, LPCSCROLLINFO, BOOL);
+
+static int WINAPI Lib_SetScrollInfo(HWND hwnd, int bar, LPCSCROLLINFO si, BOOL redraw)
+{
+    int r = LibReal_SetScrollInfo(hwnd, bar, si, redraw);
+    if (redraw && g_dark && GetCurrentThreadId() == g_uiThread)
+        PaintThinThumbs(hwnd);
+    return r;
+}
+
 static void PatchSystemLibraries(void)
 {
     static HMODULE done[16];
@@ -2392,6 +2605,18 @@ static void PatchSystemLibraries(void)
         if (Real_DrawEdge)
             PatchImportByAddress(mods[i], (FARPROC)Real_DrawEdge, Hook_DrawEdge);
         PatchThemeImports(mods[i]);
+        if (!LibReal_SetScrollInfo)
+            LibReal_SetScrollInfo = (void *)GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetScrollInfo");
+        PatchImportByAddress(mods[i], (FARPROC)LibReal_SetScrollInfo, Lib_SetScrollInfo);
+        if (!lstrcmpiW(name, L"comctl32.dll")) {
+            HMODULE gdi = GetModuleHandleW(L"gdi32.dll");
+            if (!LibReal_SetBkColor) {
+                LibReal_SetBkColor = (void *)GetProcAddress(gdi, "SetBkColor");
+                LibReal_SetTextColor = (void *)GetProcAddress(gdi, "SetTextColor");
+            }
+            PatchImportByAddress(mods[i], (FARPROC)LibReal_SetBkColor, Lib_SetBkColor);
+            PatchImportByAddress(mods[i], (FARPROC)LibReal_SetTextColor, Lib_SetTextColor);
+        }
     }
 }
 
@@ -2463,7 +2688,9 @@ static LRESULT CALLBACK CallWndRetProc(int code, WPARAM wp, LPARAM lp)
             if (!g_cdTop)
                 ZeroMemory(g_barDCs, sizeof(g_barDCs));
         }
-        if (c->message == WM_INITMENUPOPUP && g_dark && !HIWORD(c->lParam)) {  // not the window (system) menu
+        if (c->message == WM_ENTERIDLE && c->wParam == MSGF_MENU && g_dark) {
+            EnumThreadWindows(GetCurrentThreadId(), PaintMenuFrame, 0);
+        } else if (c->message == WM_INITMENUPOPUP && g_dark && !HIWORD(c->lParam)) {  // not the window (system) menu
             OwnerDrawMenu((HMENU)c->wParam);
         } else if (c->message == WM_EXITMENULOOP) {
             RestoreMenus(0, 0);
