@@ -555,6 +555,9 @@ static HGDIOBJ TwinUnlink(Twin *s)
     return twin;
 }
 
+// While set, pen twins are made in this color instead of the flipped one.
+static COLORREF g_forcePen = CLR_INVALID;
+
 static HGDIOBJ MapObject(HGDIOBJ h)
 {
     if (!g_dark || !h)
@@ -581,7 +584,7 @@ static HGDIOBJ MapObject(HGDIOBJ h)
     } else {
         LOGPEN lp;
         GetObjectW(h, sizeof(lp), &lp);
-        lp.lopnColor = Fwd(color);
+        lp.lopnColor = g_forcePen != CLR_INVALID ? g_forcePen : Fwd(color);
         twin = CreatePenIndirect(&lp);
     }
     if (!twin)
@@ -604,7 +607,7 @@ static HGDIOBJ MapObject(HGDIOBJ h)
             s->color = color;
             w->twin = twin;
             w->owner = h;
-            w->color = Fwd(color);
+            w->color = type == OBJ_PEN && g_forcePen != CLR_INVALID ? g_forcePen : Fwd(color);
         } else {
             // Table full: draw unflipped rather than leak.
             if (s)
@@ -728,8 +731,23 @@ static COLORREF WINAPI Hook_GetPixel(HDC dc, int x, int y)
     return InvIf(Real_GetPixel(dc, x, y));
 }
 
+// Nesting count of WM_PAINT in AirDC's window tab strip (FlatTabCtrl).
+static int g_tabPaint;
+#define BORDER_NORMAL RGB(52, 52, 52)
+
 static HGDIOBJ WINAPI Hook_SelectObject(HDC dc, HGDIOBJ h)
 {
+    // The tab strip's 1px border pens (the tab border colors in AirDC's
+    // settings) come out light grey and white once flipped: draw them dark.
+    // Its 2px pen joins the active tab to the window and keeps its color.
+    LOGPEN lp;
+    if (g_dark && g_tabPaint && h && GetObjectType(h) == OBJ_PEN && GetObjectW(h, sizeof(lp), &lp) == sizeof(lp) &&
+        lp.lopnWidth.x <= 1) {
+        g_forcePen = BORDER_NORMAL;
+        HGDIOBJ twin = MapObject(h);
+        g_forcePen = CLR_INVALID;
+        return UnmapObject(Real_SelectObject(dc, twin));
+    }
     // AirDC often deletes what SelectObject returns: hand back its own
     // object, never the twin.
     return UnmapObject(Real_SelectObject(dc, MapObject(h)));
@@ -1408,7 +1426,6 @@ static HRESULT WINAPI Lib_CloseThemeData(HTHEME t)
     return LibReal_CloseThemeData(t);
 }
 
-#define BORDER_NORMAL RGB(52, 52, 52)
 #define BORDER_HOT    RGB(85, 85, 85)
 
 static void FlatBox(HDC dc, const RECT *rc, COLORREF border, COLORREF fill)
@@ -2339,6 +2356,12 @@ static LRESULT CALLBACK SubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, 
     }
 
     case WM_PAINT:
+        if (IsClass(hwnd, L"FlatTabCtrl")) {
+            g_tabPaint++;
+            LRESULT r = DefSubclassProc(hwnd, msg, wp, lp);
+            g_tabPaint--;
+            return r;
+        }
         if (IsClass(hwnd, L"#32770") && IsMessageBox(hwnd)) {
             PaintMessageBox(hwnd);
             return 0;
