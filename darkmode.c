@@ -1327,7 +1327,7 @@ static FARPROC WINAPI Hook_GetProcAddress(HMODULE module, LPCSTR name)
 // Borders and spin buttons drawn by comctl32 and rich edit: even the dark
 // themes draw edit/combo borders and up-down buttons light grey.
 
-typedef enum { TK_NONE, TK_EDIT, TK_COMBO, TK_SPIN, TK_GROUPBOX, TK_LISTVIEW, TK_DATEPICKER, TK_TOOLBAR } ThemeKind;
+typedef enum { TK_NONE, TK_EDIT, TK_COMBO, TK_SPIN, TK_GROUPBOX, TK_LISTVIEW, TK_DATEPICKER, TK_TOOLBAR, TK_STATUS } ThemeKind;
 
 static void PatchImportByAddress(HMODULE module, FARPROC target, void *hook);
 
@@ -1357,7 +1357,7 @@ static ThemeKind ClassKind(LPCWSTR classes)
     static const struct { const WCHAR *name; ThemeKind k; } names[] = {
         { L"Edit", TK_EDIT }, { L"Combobox", TK_COMBO }, { L"Spin", TK_SPIN }, { L"Button", TK_GROUPBOX },
         { L"ListView", TK_LISTVIEW }, { L"DatePicker", TK_DATEPICKER },
-        { L"Toolbar", TK_TOOLBAR },
+        { L"Toolbar", TK_TOOLBAR }, { L"Status", TK_STATUS },
     };
     for (int i = 0; i < ARRAYSIZE(names); i++)
         if (lstrlenW(names[i].name) == len && CompareStringOrdinal(p, len, names[i].name, len, TRUE) == CSTR_EQUAL)
@@ -1427,6 +1427,7 @@ static HRESULT WINAPI Lib_CloseThemeData(HTHEME t)
 }
 
 #define BORDER_HOT    RGB(85, 85, 85)
+#define STATUS_BG     RGB(44, 44, 44)  // the dark theme's status bar fill
 
 static void FlatBox(HDC dc, const RECT *rc, COLORREF border, COLORREF fill)
 {
@@ -1496,6 +1497,13 @@ static BOOL DrawDarkPart(ThemeKind k, HDC dc, int part, int state, const RECT *r
             return TRUE;
         }
         break;
+    case TK_STATUS:
+        // The dark status bar background has a grey line along its top.
+        if (part == 0) {
+            Real_FillRect(dc, rc, SolidBrush(STATUS_BG));
+            return TRUE;
+        }
+        break;
     case TK_TOOLBAR:
         // Checked buttons (the open frames) get no box: their icons sit on the
         // toolbar background. Hot and pressed states keep the theme's look.
@@ -1540,6 +1548,8 @@ static ThemeKind KindOfDC(HDC dc)
         return TK_NONE;
     if (!lstrcmpiW(cls, UPDOWN_CLASSW))
         return TK_SPIN;
+    if (!lstrcmpiW(cls, STATUSCLASSNAMEW))
+        return TK_STATUS;
     if (!lstrcmpiW(cls, WC_EDITW))
         return TK_EDIT;
     if (!lstrcmpiW(cls, WC_COMBOBOXW))
