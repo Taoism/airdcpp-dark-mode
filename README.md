@@ -70,6 +70,10 @@ AirDC.exe imports `msimg32.dll`, so a DLL with that name in the program folder i
 - gives Windows-drawn controls the native dark themes and a dark system palette inside comctl32 and the rich edit control;
 - draws the parts Windows has no dark style for (menu bar, popup menus, borders, spin buttons, group boxes, disabled text, progress bar text) itself.
 
+## Credits
+
+Written with the help of Claude.
+
 ## License
 
 [MIT](LICENSE)
